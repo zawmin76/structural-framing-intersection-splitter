@@ -1,0 +1,1040 @@
+{
+  "Uuid": "c30154ee-b89f-42ba-b1ca-6bbd3cf24965",
+  "IsCustomNode": false,
+  "Description": "",
+  "Name": "Split Beams",
+  "ElementResolver": {
+    "ResolutionMap": {}
+  },
+  "Inputs": [],
+  "Outputs": [],
+  "Nodes": [
+    {
+      "ConcreteType": "PythonNodeModels.PythonNode, PythonNodeModels",
+      "NodeType": "PythonScriptNode",
+      "Code": "import clr\r\nclr.AddReference('RevitAPI')\r\nclr.AddReference('RevitServices')\r\nclr.AddReference('ProtoGeometry')\r\nclr.AddReference(\"RevitNodes\")\r\nfrom Autodesk.Revit.DB import *\r\nfrom RevitServices.Persistence import DocumentManager\r\nfrom RevitServices.Transactions import TransactionManager\r\nfrom Autodesk.DesignScript.Geometry import Point, Geometry\r\nimport Revit\r\nclr.ImportExtensions(Revit.Elements)\r\nclr.ImportExtensions(Revit.GeometryConversion)\r\n\r\nreport = []\r\n\r\ndef log(message):\r\n    report.append(message)\r\n\r\ndef get_curve(beam):\r\n    try:\r\n        return beam.Location.Curve\r\n    except:\r\n        return None\r\n\r\ndef find_real_intersections(curve1, curve2, beam_id_1=None, beam_id_2=None, tolerance=300, z_tolerance=0, verbose=True):\r\n    intersection_points = []\r\n    try:\r\n        start_pt = curve1.GetEndPoint(0).ToPoint()\r\n        end_pt = curve1.GetEndPoint(1).ToPoint()\r\n        start_z = start_pt.Z\r\n\r\n        curve1_proto = curve1.ToProtoType()\r\n        curve2_proto = curve2.ToProtoType()\r\n\r\n        curve1_start = curve1.GetEndPoint(0).ToPoint()\r\n        curve1_end = curve1.GetEndPoint(1).ToPoint()\r\n        curve2_start = curve2.GetEndPoint(0).ToPoint()\r\n        curve2_end = curve2.GetEndPoint(1).ToPoint()\r\n\r\n        if verbose:\r\n            log(\"  Beam {} curve: ({}, {}, {}) to ({}, {}, {})\".format(\r\n                beam_id_1,\r\n                round(curve1_start.X, 1), round(curve1_start.Y, 1), round(curve1_start.Z, 1),\r\n                round(curve1_end.X, 1), round(curve1_end.Y, 1), round(curve1_end.Z, 1)))\r\n            log(\"  Beam {} curve: ({}, {}, {}) to ({}, {}, {})\".format(\r\n                beam_id_2,\r\n                round(curve2_start.X, 1), round(curve2_start.Y, 1), round(curve2_start.Z, 1),\r\n                round(curve2_end.X, 1), round(curve2_end.Y, 1), round(curve2_end.Z, 1)))\r\n\r\n        raw_intersections = Geometry.Intersect(curve1_proto, curve2_proto)\r\n\r\n        points = []\r\n        if raw_intersections is None:\r\n            if verbose:\r\n                log(\"Beam {} to {}: No raw intersections found (None)\".format(beam_id_1, beam_id_2))\r\n            return intersection_points\r\n        elif isinstance(raw_intersections, Point):\r\n            points = [raw_intersections]\r\n            if verbose:\r\n                log(\"Beam {} to {}: Found 1 raw intersection point\".format(beam_id_1, beam_id_2))\r\n        elif hasattr(raw_intersections, '__iter__'):\r\n            points = [item for item in raw_intersections if isinstance(item, Point)]\r\n            if verbose:\r\n                log(\"Beam {} to {}: Found {} raw intersection points\".format(beam_id_1, beam_id_2, len(points)))\r\n        else:\r\n            if verbose:\r\n                log(\"Beam {} to {}: Raw intersections type not recognized\".format(beam_id_1, beam_id_2))\r\n            return intersection_points\r\n\r\n        curve2_start = curve2.GetEndPoint(0).ToPoint()\r\n        curve2_end = curve2.GetEndPoint(1).ToPoint()\r\n\r\n        for pt in points:\r\n            xy_distance_to_curve1_start = Point.ByCoordinates(pt.X, pt.Y, 0).DistanceTo(Point.ByCoordinates(start_pt.X, start_pt.Y, 0))\r\n            xy_distance_to_curve1_end = Point.ByCoordinates(pt.X, pt.Y, 0).DistanceTo(Point.ByCoordinates(end_pt.X, end_pt.Y, 0))\r\n            xy_distance_to_curve2_start = Point.ByCoordinates(pt.X, pt.Y, 0).DistanceTo(Point.ByCoordinates(curve2_start.X, curve2_start.Y, 0))\r\n            xy_distance_to_curve2_end = Point.ByCoordinates(pt.X, pt.Y, 0).DistanceTo(Point.ByCoordinates(curve2_end.X, curve2_end.Y, 0))\r\n\r\n            if verbose:\r\n                log(\"  Point ({}, {}, {}): dist_to_curve1_start={}, dist_to_curve1_end={}, dist_to_curve2_start={}, dist_to_curve2_end={}\".format(\r\n                    round(pt.X, 2), round(pt.Y, 2), round(pt.Z, 2),\r\n                    round(xy_distance_to_curve1_start, 2), round(xy_distance_to_curve1_end, 2),\r\n                    round(xy_distance_to_curve2_start, 2), round(xy_distance_to_curve2_end, 2)))\r\n\r\n            curve1_endpoint_close = (xy_distance_to_curve1_start < tolerance or xy_distance_to_curve1_end < tolerance)\r\n            curve2_endpoint_close = (xy_distance_to_curve2_start < tolerance or xy_distance_to_curve2_end < tolerance)\r\n\r\n            if verbose:\r\n                log(\"    Curve1 endpoint close: {}, Curve2 endpoint close: {}\".format(curve1_endpoint_close, curve2_endpoint_close))\r\n\r\n            if curve1_endpoint_close and curve2_endpoint_close:\r\n                if verbose:\r\n                    log(\"    REJECTED (point close to endpoints of both curves)\")\r\n            else:\r\n                if z_tolerance > 0:\r\n                    z_diff = abs(pt.Z - start_z)\r\n                    if verbose:\r\n                        log(\"    Z check: z_diff={}, z_tolerance={}\".format(round(z_diff, 2), z_tolerance))\r\n                    if z_diff <= z_tolerance:\r\n                        intersection_points.append(pt)\r\n                        if verbose:\r\n                            log(\"    ACCEPTED (in middle of at least one curve, Z within tolerance)\")\r\n                    else:\r\n                        if verbose:\r\n                            log(\"    REJECTED (Z out of tolerance)\")\r\n                else:\r\n                    intersection_points.append(pt)\r\n                    if verbose:\r\n                        log(\"    ACCEPTED (in middle of at least one curve, no Z tolerance check)\")\r\n\r\n        if verbose and len(intersection_points) > 0:\r\n            log(\"Beam {} to {}: Found {} valid intersections\".format(beam_id_1, beam_id_2, len(intersection_points)))\r\n\r\n    except Exception as e:\r\n        log(\"Error checking Beam {} to {}: {}\".format(beam_id_1, beam_id_2, str(e)))\r\n\r\n    return intersection_points\r\n\r\n# Initialize\r\ndoc = DocumentManager.Instance.CurrentDBDocument\r\nuidoc = DocumentManager.Instance.CurrentUIDocument\r\nview = uidoc.ActiveView\r\n\r\ntolerance = IN[2] if len(IN) > 2 else 300\r\nz_tolerance = IN[3] if len(IN) > 3 else 0\r\nsplit_enabled = bool(IN[1]) if len(IN) > 1 else False\r\n\r\nlog(\"Active view: {}\".format(view.Name))\r\nlog(\"Tolerance: {}\".format(tolerance))\r\nlog(\"Z tolerance: {}\".format(z_tolerance))\r\n\r\n# Collect structural framing elements\r\ncollector = FilteredElementCollector(doc, view.Id)\r\nstruct_framing_filter = ElementCategoryFilter(BuiltInCategory.OST_StructuralFraming)\r\nbeams = collector.WherePasses(struct_framing_filter).WhereElementIsNotElementType().ToElements()\r\n\r\nlog(\"Total beams found: {}\".format(len(beams)))\r\nlog(\"Split enabled: {}\".format(split_enabled))\r\n\r\n# Extract curves\r\ncurves = []\r\nbeam_curve_map = []\r\nfor b in beams:\r\n    if b.Location and hasattr(b.Location, 'Curve'):\r\n        curve = get_curve(b)\r\n        if curve:\r\n            curves.append(curve)\r\n            beam_curve_map.append(b)\r\n\r\nlog(\"Total curves extracted: {}\".format(len(curves)))\r\n\r\n# Find all intersections\r\nbeam_intersections = {}\r\nfor i in range(len(beam_curve_map)):\r\n    beam_intersections[i] = []\r\n\r\nif not split_enabled:\r\n    log(\"Checking for intersections between {} curves\".format(len(curves)))\r\n\r\nchecked_pairs = set()\r\npair_count = 0\r\nfor i in range(len(curves)):\r\n    for j in range(len(curves)):\r\n        if i != j:\r\n            pair_key = tuple(sorted([i, j]))\r\n            if pair_key not in checked_pairs:\r\n                checked_pairs.add(pair_key)\r\n                pair_count += 1\r\n                beam_id_i = beam_curve_map[i].Id if i < len(beam_curve_map) else None\r\n                beam_id_j = beam_curve_map[j].Id if j < len(beam_curve_map) else None\r\n                intersections = find_real_intersections(curves[i], curves[j], beam_id_i, beam_id_j, tolerance, z_tolerance, verbose=not split_enabled)\r\n                if intersections:\r\n                    if i not in beam_intersections:\r\n                        beam_intersections[i] = []\r\n                    if j not in beam_intersections:\r\n                        beam_intersections[j] = []\r\n\r\n                    for pt in intersections:\r\n                        try:\r\n                            xyz_pt = pt.ToXyz()\r\n                        except:\r\n                            xyz_pt = pt\r\n\r\n                        # Verify point validity on beam i\r\n                        try:\r\n                            proj_i = curves[i].Project(xyz_pt)\r\n                            if proj_i is not None:\r\n                                start_i = curves[i].GetEndParameter(0)\r\n                                end_i = curves[i].GetEndParameter(1)\r\n                                norm_i = (proj_i.Parameter - start_i) / (end_i - start_i)\r\n                                if 0.0001 < norm_i < 0.9999:\r\n                                    beam_intersections[i].append(pt)\r\n                        except:\r\n                            pass\r\n\r\n                        # Verify point validity on beam j\r\n                        try:\r\n                            proj_j = curves[j].Project(xyz_pt)\r\n                            if proj_j is not None:\r\n                                start_j = curves[j].GetEndParameter(0)\r\n                                end_j = curves[j].GetEndParameter(1)\r\n                                norm_j = (proj_j.Parameter - start_j) / (end_j - start_j)\r\n                                if 0.0001 < norm_j < 0.9999:\r\n                                    beam_intersections[j].append(pt)\r\n                        except:\r\n                            pass\r\n\r\n# Log summary\r\ntotal_intersections = sum(len(pts) for pts in beam_intersections.values())\r\nif split_enabled:\r\n    log(\"Total intersections found (for split): {}\".format(total_intersections))\r\nelse:\r\n    log(\"Total intersections found: {}\".format(total_intersections))\r\n    log(\"Total unique pairs checked: {}\".format(pair_count))\r\n\r\n# Detection mode: output intersections with curve for preview\r\nif not split_enabled:\r\n    beam_intersection_pairs = []\r\n    for beam_idx in range(len(beam_curve_map)):\r\n        beam = beam_curve_map[beam_idx]\r\n        beam_id = beam.Id\r\n        intersections = beam_intersections.get(beam_idx, [])\r\n\r\n        # Get dynamo curve for preview\r\n        dynamo_curve = None\r\n        if beam_idx < len(curves):\r\n            curve = curves[beam_idx]\r\n            dynamo_curve = curve.ToProtoType()\r\n\r\n        if intersections:\r\n            beam_intersection_pairs.append([beam, beam_id, dynamo_curve, intersections])\r\n            log(\"Beam {}: {} intersections found\".format(beam_id, len(intersections)))\r\n        else:\r\n            beam_intersection_pairs.append([beam, beam_id, dynamo_curve, []])\r\n\r\n    OUT = [beam_intersection_pairs, report]\r\n\r\n# Split mode: split beams at intersections\r\nelse:\r\n    log(\"Starting beam splitting analysis...\")\r\n    log(\"Total beams to process: {}\".format(len(beam_curve_map)))\r\n\r\n    beams_with_intersections = sum(1 for pts in beam_intersections.values() if len(pts) > 0)\r\n    log(\"Total beams with intersection points: {}\".format(beams_with_intersections))\r\n\r\n    split_data = []\r\n\r\n    for beam_idx, beam in enumerate(beam_curve_map):\r\n        if beam_idx < len(curves):\r\n            curve = curves[beam_idx]\r\n            beam_id = beam.Id\r\n            split_pts = beam_intersections.get(beam_idx, [])\r\n\r\n            if len(split_pts) > 0:\r\n                log(\"Beam {}: Has {} intersection points for split\".format(beam_id, len(split_pts)))\r\n\r\n                split_params = []\r\n                for pt_idx, pt in enumerate(split_pts):\r\n                    try:\r\n                        pt_type = type(pt).__name__\r\n                        if pt_idx == 0:\r\n                            log(\"  Point type in beam_intersections: {}\".format(pt_type))\r\n\r\n                        try:\r\n                            xyz_pt = pt.ToXyz()\r\n                        except:\r\n                            xyz_pt = pt\r\n\r\n                        proj = curve.Project(xyz_pt)\r\n                        if proj is not None:\r\n                            start_param = curve.GetEndParameter(0)\r\n                            end_param = curve.GetEndParameter(1)\r\n                            param = proj.Parameter\r\n                            normalized_param = (param - start_param) / (end_param - start_param)\r\n\r\n                            log(\"  Point ({}, {}, {}): raw_param={}, normalized={}, start={}, end={}\".format(\r\n                                round(pt.X, 1), round(pt.Y, 1), round(pt.Z, 1),\r\n                                round(param, 2), round(normalized_param, 4), round(start_param, 2), round(end_param, 2)))\r\n\r\n                            tolerance_buffer = 0.0001\r\n                            if tolerance_buffer < normalized_param < (1.0 - tolerance_buffer):\r\n                                split_params.append(normalized_param)\r\n                                log(\"    -> ACCEPTED (param in range 0-1)\")\r\n                            else:\r\n                                log(\"    -> REJECTED (param={}, outside valid range)\".format(round(normalized_param, 4)))\r\n                        else:\r\n                            log(\"  WARNING: Could not project point ({}, {}, {}) onto beam {}\".format(\r\n                                round(pt.X, 1), round(pt.Y, 1), round(pt.Z, 1), beam_id))\r\n                    except Exception as e:\r\n                        log(\"  ERROR: Exception projecting point onto beam {}: {}\".format(beam_id, str(e)))\r\n\r\n                if len(split_params) > 0:\r\n                    split_params = sorted(split_params)\r\n                    log(\"Beam {}: {} split points\".format(beam_id, len(split_params)))\r\n                    split_data.append([beam, beam_id, split_params])\r\n\r\n    log(\"Total beams with split points: {}\".format(len(split_data)))\r\n\r\n    TransactionManager.Instance.EnsureInTransaction(doc)\r\n\r\n    split_results = []\r\n    beams_split = 0\r\n\r\n    for beam, beam_id, split_params in split_data:\r\n        # Prepare output\r\n        current_beam = doc.GetElement(beam_id)\r\n        dynamo_curve = None\r\n        if current_beam is not None and current_beam.Location and hasattr(current_beam.Location, 'Curve'):\r\n            beam_curve = current_beam.Location.Curve\r\n            dynamo_curve = beam_curve.ToProtoType()\r\n\r\n        beam_idx = beam_curve_map.index(beam) if beam in beam_curve_map else -1\r\n        raw_points = beam_intersections.get(beam_idx, []) if beam_idx >= 0 else []\r\n\r\n        # Remove duplicates\r\n        unique_points = []\r\n        seen_coords = set()\r\n        for pt in raw_points:\r\n            pt_key = (round(pt.X, 2), round(pt.Y, 2), round(pt.Z, 2)) if hasattr(pt, 'X') else None\r\n            if pt_key and pt_key not in seen_coords:\r\n                unique_points.append(pt)\r\n                seen_coords.add(pt_key)\r\n\r\n        split_results.append([dynamo_curve, unique_points, beam_id])\r\n        log(\"Output: Beam {} -> curve (Dynamo), {} unique intersection points (was {})\".format(\r\n            beam_id, len(unique_points), len(raw_points)))\r\n\r\n        # Perform splits with dynamic beam tracking\r\n        sorted_pts_reverse = sorted(unique_points, key=lambda pt: pt.X if hasattr(pt, 'X') else 0, reverse=True)\r\n        current_beams = [beam.Id]\r\n\r\n        for int_point in sorted_pts_reverse:\r\n            try:\r\n                try:\r\n                    xyz_pt = int_point.ToXyz()\r\n                except:\r\n                    xyz_pt = int_point\r\n\r\n                target_beam_id = None\r\n                normalized_param = None\r\n\r\n                for candidate_beam_id in current_beams:\r\n                    candidate_beam = doc.GetElement(candidate_beam_id)\r\n                    if candidate_beam is not None:\r\n                        candidate_curve = candidate_beam.Location.Curve\r\n\r\n                        pt_x = int_point.X if hasattr(int_point, 'X') else 0\r\n                        pt_y = int_point.Y if hasattr(int_point, 'Y') else 0\r\n                        pt_z = int_point.Z if hasattr(int_point, 'Z') else 0\r\n\r\n                        proj = candidate_curve.Project(xyz_pt)\r\n\r\n                        if proj is not None:\r\n                            start_param = candidate_curve.GetEndParameter(0)\r\n                            end_param = candidate_curve.GetEndParameter(1)\r\n                            param = proj.Parameter\r\n                            norm_param = (param - start_param) / (end_param - start_param)\r\n\r\n                            if 0.0001 < norm_param < 0.9999:\r\n                                target_beam_id = candidate_beam_id\r\n                                normalized_param = norm_param\r\n                                log(\"  Point ({}, {}, {}) -> belongs to beam {} (param={})\".format(\r\n                                    round(pt_x, 1), round(pt_y, 1), round(pt_z, 1),\r\n                                    candidate_beam_id, round(norm_param, 6)))\r\n                                break\r\n                            else:\r\n                                log(\"  Point ({}, {}, {}) on beam {} param={} (outside range)\".format(\r\n                                    round(pt_x, 1), round(pt_y, 1), round(pt_z, 1),\r\n                                    candidate_beam_id, round(norm_param, 6)))\r\n                        else:\r\n                            log(\"  Point ({}, {}, {}) - projection on beam {} returned None\".format(\r\n                                round(pt_x, 1), round(pt_y, 1), round(pt_z, 1), candidate_beam_id))\r\n\r\n                if target_beam_id is not None and normalized_param is not None:\r\n                    try:\r\n                        beam_to_split = doc.GetElement(target_beam_id)\r\n                        if beam_to_split is not None:\r\n                            new_beam_id = beam_to_split.Split(normalized_param)\r\n                            beams_split += 1\r\n                            log(\"  SPLIT: Beam {} at param {} -> new beam {}\".format(\r\n                                target_beam_id, round(normalized_param, 6), new_beam_id))\r\n                            current_beams.append(new_beam_id)\r\n                    except Exception as e:\r\n                        log(\"  ERROR splitting beam {} at param {}: {}\".format(target_beam_id, round(normalized_param, 6), str(e)))\r\n                else:\r\n                    log(\"  Point ({}, {}, {}) -> NOT found on any current beam segment\".format(\r\n                        round(int_point.X, 1) if hasattr(int_point, 'X') else 0,\r\n                        round(int_point.Y, 1) if hasattr(int_point, 'Y') else 0,\r\n                        round(int_point.Z, 1) if hasattr(int_point, 'Z') else 0))\r\n\r\n            except Exception as e:\r\n                log(\"  ERROR processing intersection point: {}\".format(str(e)))\r\n\r\n    log(\"Total output entries: {}\".format(len(split_results)))\r\n    log(\"Total beams split: {}\".format(beams_split))\r\n\r\n    TransactionManager.Instance.TransactionTaskDone()\r\n\r\n    OUT = [split_results, report]\r\n",
+      "Engine": "CPython3",
+      "EngineName": "CPython3",
+      "VariableInputPorts": true,
+      "Id": "c310f4c538e54b61a9a1f8b804f14155",
+      "Inputs": [
+        {
+          "Id": "14f7b0dd511841f2a32486b471401f24",
+          "Name": "IN[0]",
+          "Description": "Input #0",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "546159f7499f42bbb0174b1316812fd5",
+          "Name": "IN[1]",
+          "Description": "Input #1",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "182097b8f3a54215a996c7d252ef6732",
+          "Name": "IN[2]",
+          "Description": "Input #2",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "88f5660997b74ef0bc2321eff6c56340",
+          "Name": "IN[3]",
+          "Description": "Input #3",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "232751d45939402194aab3c82b600eb5",
+          "Name": "OUT",
+          "Description": "Result of the python script",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Runs an embedded Python script."
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Input.BoolSelector, CoreNodeModels",
+      "NodeType": "BooleanInputNode",
+      "InputValue": false,
+      "Id": "ca14f8ac7c22446ca64629e8ba2a42ab",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "36d5873be4d24b6babeeb5853fc77271",
+          "Name": "",
+          "Description": "Boolean",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Selection between a true and false."
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Watch, CoreNodeModels",
+      "NodeType": "ExtensionNode",
+      "Id": "fcb4fa2df0154d22ab53df9fcbfd84b4",
+      "Inputs": [
+        {
+          "Id": "1ed5e612e9d046dd9b7e7799078b4a23",
+          "Name": "",
+          "Description": "Node to show output from",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "858d2fd33c484f07943f76b148554751",
+          "Name": "",
+          "Description": "Node output",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Visualize the node's output"
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Input.BoolSelector, CoreNodeModels",
+      "NodeType": "BooleanInputNode",
+      "InputValue": true,
+      "Id": "428a6edaf7684da6baff078a04c38b91",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "0317f0e08f8f48e79d24e0a1de720a28",
+          "Name": "",
+          "Description": "Boolean",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Selection between a true and false."
+    },
+    {
+      "ConcreteType": "Dynamo.Nodes.DSModelElementsSelection, DSRevitNodesUI",
+      "NodeType": "ExtensionNode",
+      "InstanceId": [
+        "ffb97059-ba74-461a-9c2b-5e19847d282d-00054d27"
+      ],
+      "Id": "f4961716b91e4f71864ef4203932fdb3",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "81b4127b75594c1f9c4ad266cb76680b",
+          "Name": "Elements",
+          "Description": "The selected elements.",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.ZeroTouch.DSFunction, DynamoCore",
+      "NodeType": "FunctionNode",
+      "FunctionSignature": "Revit.Elements.Element.Curves",
+      "Id": "359d24d2ba8e41f1a6a0adc165ba579d",
+      "Inputs": [
+        {
+          "Id": "1cad640c4fab44e9a56f23e64f00039a",
+          "Name": "element",
+          "Description": "Revit.Elements.Element",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "c07ba2f0889d4c6fa66ef91a0f47a25b",
+          "Name": "Curve[]",
+          "Description": "Curve[]",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Auto",
+      "Description": "The Curves in this Element\n\nElement.Curves: Curve[]"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.ZeroTouch.DSFunction, DynamoCore",
+      "NodeType": "FunctionNode",
+      "FunctionSignature": "DSCore.List.Flatten@var[]..[],int",
+      "Id": "bfdc041de87b4e9eb3da4bb9140b9df2",
+      "Inputs": [
+        {
+          "Id": "9f51e35d18e24951bbcb3f0ccd7c9d80",
+          "Name": "list",
+          "Description": "List to flatten.\n\nvar[]..[]",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "77861706621b4e74835623af986cfa93",
+          "Name": "amount",
+          "Description": "Layers of list nesting to remove (-1 will remove all list nestings)\n\nint\nDefault value : -1",
+          "UsingDefaultValue": true,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "6b8a9ab8491e43eca58c9e86dd7fed6c",
+          "Name": "list",
+          "Description": "Flattened list by amount",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Auto",
+      "Description": "Flattens a nested list of lists by a certain amount.\n\nList.Flatten (list: var[]..[], amount: int = -1): var[]..[]"
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Watch, CoreNodeModels",
+      "NodeType": "ExtensionNode",
+      "Id": "8283b57045274bb480069d4efe932e1b",
+      "Inputs": [
+        {
+          "Id": "8e124fb8f61c44f1a05760712ac8e77b",
+          "Name": "",
+          "Description": "Node to show output from",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "b2bff7e9116a48f9ae634039e53d80dc",
+          "Name": "",
+          "Description": "Node output",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Visualize the node's output"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.CodeBlockNodeModel, DynamoCore",
+      "NodeType": "CodeBlockNode",
+      "Code": "400;",
+      "Id": "61fb4c60d05c43df8315a28a753b8da5",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "6f3b94d91c69424a8a7f4c233b802236",
+          "Name": "",
+          "Description": "Value of expression at line 1",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Allows for DesignScript code to be authored directly"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.CodeBlockNodeModel, DynamoCore",
+      "NodeType": "CodeBlockNode",
+      "Code": "1000;",
+      "Id": "ca0efc073ecb499fbb18f3c3f9a67312",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "d15c421f71194c7ab72be0bd02fb352a",
+          "Name": "",
+          "Description": "Value of expression at line 1",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Allows for DesignScript code to be authored directly"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.ZeroTouch.DSFunction, DynamoCore",
+      "NodeType": "FunctionNode",
+      "FunctionSignature": "DSCore.Object.Type@var",
+      "Id": "4a32efaf962f44cda6281a34e5cb08d4",
+      "Inputs": [
+        {
+          "Id": "70d49aa1cf0c4a878b2f7bc079f84173",
+          "Name": "object",
+          "Description": "Object to query type\n\nvar",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "e23bfd23d6e944d599418e6fc7567b5c",
+          "Name": "string",
+          "Description": "Type of object.",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Auto",
+      "Description": "Returns the type of object represented as string.\n\nObject.Type (object: var): string"
+    },
+    {
+      "ConcreteType": "PythonNodeModels.PythonNode, PythonNodeModels",
+      "NodeType": "PythonScriptNode",
+      "Code": "import clr\r\nclr.AddReference('RevitAPI')\r\nclr.AddReference('RevitServices')\r\nclr.AddReference('ProtoGeometry')\r\nclr.AddReference(\"RevitNodes\")\r\nfrom Autodesk.Revit.DB import *\r\nfrom RevitServices.Persistence import DocumentManager\r\nfrom RevitServices.Transactions import TransactionManager\r\nfrom Autodesk.DesignScript.Geometry import Point, Geometry\r\nimport Revit\r\nclr.ImportExtensions(Revit.Elements)\r\nclr.ImportExtensions(Revit.GeometryConversion)\r\n\r\n# Import Revit's Line class (not Dynamo's)\r\nfrom Autodesk.Revit.DB import *\r\n\r\n# Get the current document\r\ndoc = DocumentManager.Instance.CurrentDBDocument\r\nuidoc = DocumentManager.Instance.CurrentUIDocument\r\nview = uidoc.ActiveView\r\n\r\n\r\n# Get structural framing elements in the active view\r\ncollector = FilteredElementCollector(doc, view.Id)\r\nstruct_framing_filter = ElementCategoryFilter(BuiltInCategory.OST_StructuralFraming)\r\nbeams = collector.WherePasses(struct_framing_filter).WhereElementIsNotElementType().ToElements()\r\n\r\n\r\nOUT = [b.GetType() for b in beams]\r\n",
+      "Engine": "CPython3",
+      "EngineName": "CPython3",
+      "VariableInputPorts": true,
+      "Id": "c58a3139f0bb4b45b81e453a0752344a",
+      "Inputs": [
+        {
+          "Id": "b4b5ada79db74d858fec9cdd8f5c3765",
+          "Name": "IN[0]",
+          "Description": "Input #0",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "e7ac47b4ca134589837b917bb8f0aec2",
+          "Name": "OUT",
+          "Description": "Result of the python script",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Runs an embedded Python script."
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Watch, CoreNodeModels",
+      "NodeType": "ExtensionNode",
+      "Id": "01180c414dc240d99714d11eee979638",
+      "Inputs": [
+        {
+          "Id": "e900afd4e987405094182ecb55aab24d",
+          "Name": "",
+          "Description": "Node to show output from",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "b917e33b98d744688c9efd761ecdd45b",
+          "Name": "",
+          "Description": "Node output",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Visualize the node's output"
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Input.BoolSelector, CoreNodeModels",
+      "NodeType": "BooleanInputNode",
+      "InputValue": true,
+      "Id": "9ab69c7ee60a46d58bbddec53179ff51",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "da398f8b032d408aad57e1f6010577fb",
+          "Name": "",
+          "Description": "Boolean",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Selection between a true and false."
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Watch, CoreNodeModels",
+      "NodeType": "ExtensionNode",
+      "Id": "9a25d2536a614fd6a983cedfcc0f0eb8",
+      "Inputs": [
+        {
+          "Id": "581b534ae4104bb7a66d91720a8f7502",
+          "Name": "",
+          "Description": "Node to show output from",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "87d9ffbc45214c77a38dbcdc3af45780",
+          "Name": "",
+          "Description": "Node output",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Visualize the node's output"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.CodeBlockNodeModel, DynamoCore",
+      "NodeType": "CodeBlockNode",
+      "Code": "a[0][b];",
+      "Id": "ddfcda0546d44d3a9ed02ee96646fbcf",
+      "Inputs": [
+        {
+          "Id": "7b955d0214b8401e80c898e88adb14fb",
+          "Name": "a",
+          "Description": "a",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "a4082082f4d844b6a270860b554a57d4",
+          "Name": "b",
+          "Description": "b",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "e11a7c7421cc469c8fc7bf7f1e3a76db",
+          "Name": "",
+          "Description": "Value of expression at line 1",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Allows for DesignScript code to be authored directly"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.CodeBlockNodeModel, DynamoCore",
+      "NodeType": "CodeBlockNode",
+      "Code": "1;",
+      "Id": "dd381ec375814e93a998cb99e6d9e77f",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "6e84ac32a5b4429daa8f6f0a5017b50d",
+          "Name": "",
+          "Description": "Value of expression at line 1",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Allows for DesignScript code to be authored directly"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.ZeroTouch.DSFunction, DynamoCore",
+      "NodeType": "FunctionNode",
+      "FunctionSignature": "Autodesk.DesignScript.Geometry.Geometry.Translate@double,double,double",
+      "Id": "df77cc76cc1548d6b3d44abcb807fe8c",
+      "Inputs": [
+        {
+          "Id": "dd9c1c24fe6b40c8ae37be08579fbd1c",
+          "Name": "geometry",
+          "Description": "Autodesk.DesignScript.Geometry.Geometry",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "f30090082eb84a018ca94424a73d332d",
+          "Name": "xTranslation",
+          "Description": "Displacement along X-axis.\n\ndouble\nDefault value : 0",
+          "UsingDefaultValue": true,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "836c1a6c004e434fb4e10771978823ff",
+          "Name": "yTranslation",
+          "Description": "Displacement along Y-axis.\n\ndouble\nDefault value : 0",
+          "UsingDefaultValue": true,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "d1166a35eec3493b8955e41e9afb2ad6",
+          "Name": "zTranslation",
+          "Description": "Displacement along Z-axis.\n\ndouble\nDefault value : 0",
+          "UsingDefaultValue": true,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "ae370beb741c472495f59ff15dff4b2c",
+          "Name": "Geometry",
+          "Description": "Transformed Geometry.",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Auto",
+      "Description": "Translates any given geometry by the given displacements in the x, y, and z directions defined in WCS respectively.\n\nGeometry.Translate (xTranslation: double = 0, yTranslation: double = 0, zTranslation: double = 0): Geometry"
+    },
+    {
+      "ConcreteType": "Dynamo.Graph.Nodes.CodeBlockNodeModel, DynamoCore",
+      "NodeType": "CodeBlockNode",
+      "Code": "-60000;",
+      "Id": "e52caf5a17004b02a2cda2698b144ffb",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "6575d0f43715441dbe1c1f77cf9a9f27",
+          "Name": "",
+          "Description": "Value of expression at line 1",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Allows for DesignScript code to be authored directly"
+    }
+  ],
+  "Connectors": [
+    {
+      "Start": "232751d45939402194aab3c82b600eb5",
+      "End": "1ed5e612e9d046dd9b7e7799078b4a23",
+      "Id": "6c1dec4bc8a744db9b1afc510ab4b11f",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "36d5873be4d24b6babeeb5853fc77271",
+      "End": "14f7b0dd511841f2a32486b471401f24",
+      "Id": "7d67ae5b32a7433b95cbcf52cc3b83a8",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "858d2fd33c484f07943f76b148554751",
+      "End": "7b955d0214b8401e80c898e88adb14fb",
+      "Id": "ee2e6fca8c2e4d0c96329cd69cde1de1",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "858d2fd33c484f07943f76b148554751",
+      "End": "dd9c1c24fe6b40c8ae37be08579fbd1c",
+      "Id": "54ba24a9e63f469680a877299b98abec",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "0317f0e08f8f48e79d24e0a1de720a28",
+      "End": "546159f7499f42bbb0174b1316812fd5",
+      "Id": "b8bca8876e624779abb258284730c775",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "81b4127b75594c1f9c4ad266cb76680b",
+      "End": "1cad640c4fab44e9a56f23e64f00039a",
+      "Id": "ee32def590c143b5ae66ebf880e2bbfe",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "81b4127b75594c1f9c4ad266cb76680b",
+      "End": "70d49aa1cf0c4a878b2f7bc079f84173",
+      "Id": "880dd34f3ab443849b60eb7d4c5b6ccf",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "c07ba2f0889d4c6fa66ef91a0f47a25b",
+      "End": "9f51e35d18e24951bbcb3f0ccd7c9d80",
+      "Id": "2a57570b20b44a9abff2fa155fb404d8",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "6f3b94d91c69424a8a7f4c233b802236",
+      "End": "182097b8f3a54215a996c7d252ef6732",
+      "Id": "ec32e424e08c4bb2a121a9e8b7f7b79e",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "d15c421f71194c7ab72be0bd02fb352a",
+      "End": "88f5660997b74ef0bc2321eff6c56340",
+      "Id": "db878541199f444f97e6e49d42436cbc",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "e23bfd23d6e944d599418e6fc7567b5c",
+      "End": "8e124fb8f61c44f1a05760712ac8e77b",
+      "Id": "4d5123808f6243409ba9e5b8dbe461a0",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "e7ac47b4ca134589837b917bb8f0aec2",
+      "End": "e900afd4e987405094182ecb55aab24d",
+      "Id": "eda29990ca9c486b839b8332ef29ad80",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "da398f8b032d408aad57e1f6010577fb",
+      "End": "b4b5ada79db74d858fec9cdd8f5c3765",
+      "Id": "ad5eb8c0e214415182821324d9533a62",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "e11a7c7421cc469c8fc7bf7f1e3a76db",
+      "End": "581b534ae4104bb7a66d91720a8f7502",
+      "Id": "7f01fbe51d9447369d0bcd83515bb25c",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "6e84ac32a5b4429daa8f6f0a5017b50d",
+      "End": "a4082082f4d844b6a270860b554a57d4",
+      "Id": "66da90a3615d42338950a15caf9a0110",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "6575d0f43715441dbe1c1f77cf9a9f27",
+      "End": "f30090082eb84a018ca94424a73d332d",
+      "Id": "f301d76f94d6473db48815cd5b2aebd6",
+      "IsHidden": "False"
+    }
+  ],
+  "Dependencies": [],
+  "NodeLibraryDependencies": [],
+  "Thumbnail": "",
+  "GraphDocumentationURL": null,
+  "ExtensionWorkspaceData": [
+    {
+      "ExtensionGuid": "28992e1d-abb9-417f-8b1b-05e053bee670",
+      "Name": "Properties",
+      "Version": "2.16",
+      "Data": {}
+    },
+    {
+      "ExtensionGuid": "DFBD9CC0-DB40-457A-939E-8C8555555A9D",
+      "Name": "Generative Design",
+      "Version": "3.0",
+      "Data": {}
+    }
+  ],
+  "Author": "",
+  "Linting": {
+    "activeLinter": "None",
+    "activeLinterId": "7b75fb44-43fd-4631-a878-29f4d5d8399a",
+    "warningCount": 0,
+    "errorCount": 0
+  },
+  "Bindings": [],
+  "View": {
+    "Dynamo": {
+      "ScaleFactor": 1.0,
+      "HasRunWithoutCrash": true,
+      "IsVisibleInDynamoLibrary": true,
+      "Version": "2.16.4.10216",
+      "RunType": "Manual",
+      "RunPeriod": "1000"
+    },
+    "Camera": {
+      "Name": "Background Preview",
+      "EyeX": -136698.890625,
+      "EyeY": 91312.828125,
+      "EyeZ": 199694.4375,
+      "LookX": 1187.609375,
+      "LookY": -51106.3203125,
+      "LookZ": -9199.40625,
+      "UpX": 0.11814595758914948,
+      "UpY": 0.38536903262138367,
+      "UpZ": -0.91516798734664917
+    },
+    "ConnectorPins": [],
+    "NodeViews": [
+      {
+        "Name": "Python Script",
+        "ShowGeometry": false,
+        "Id": "c310f4c538e54b61a9a1f8b804f14155",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -959.55699932226617,
+        "Y": 230.02550378907651
+      },
+      {
+        "Name": "Boolean",
+        "ShowGeometry": false,
+        "Id": "ca14f8ac7c22446ca64629e8ba2a42ab",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -1253.5569993222662,
+        "Y": 42.025503789076481
+      },
+      {
+        "Name": "Watch",
+        "ShowGeometry": true,
+        "Id": "fcb4fa2df0154d22ab53df9fcbfd84b4",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -674.89033265559954,
+        "Y": 213.02550378907665
+      },
+      {
+        "Name": "Split",
+        "ShowGeometry": false,
+        "Id": "428a6edaf7684da6baff078a04c38b91",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -1253.5569993222662,
+        "Y": 201.02550378907648
+      },
+      {
+        "Name": "Select Model Elements",
+        "ShowGeometry": false,
+        "Id": "f4961716b91e4f71864ef4203932fdb3",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": true,
+        "X": -1137.5006867972834,
+        "Y": 1792.6199676031533
+      },
+      {
+        "Name": "Element.Curves",
+        "ShowGeometry": false,
+        "Id": "359d24d2ba8e41f1a6a0adc165ba579d",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -793.50068679728327,
+        "Y": 1698.6199676031533
+      },
+      {
+        "Name": "List.Flatten",
+        "ShowGeometry": false,
+        "Id": "bfdc041de87b4e9eb3da4bb9140b9df2",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -472.16735346394989,
+        "Y": 1698.6199676031533
+      },
+      {
+        "Name": "Watch",
+        "ShowGeometry": false,
+        "Id": "8283b57045274bb480069d4efe932e1b",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -472.16735346394989,
+        "Y": 1886.6199676031533
+      },
+      {
+        "Name": "Tolerance",
+        "ShowGeometry": false,
+        "Id": "61fb4c60d05c43df8315a28a753b8da5",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -1253.5569993222662,
+        "Y": 360.85300378907647
+      },
+      {
+        "Name": "Z Tolerance",
+        "ShowGeometry": false,
+        "Id": "ca0efc073ecb499fbb18f3c3f9a67312",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -1253.5569993222662,
+        "Y": 519.85300378907641
+      },
+      {
+        "Name": "Object.Type",
+        "ShowGeometry": false,
+        "Id": "4a32efaf962f44cda6281a34e5cb08d4",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -793.50068679728327,
+        "Y": 1886.6199676031533
+      },
+      {
+        "Name": "Python Script",
+        "ShowGeometry": false,
+        "Id": "c58a3139f0bb4b45b81e453a0752344a",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -724.97352500253487,
+        "Y": 2359.3963023435444
+      },
+      {
+        "Name": "Watch",
+        "ShowGeometry": false,
+        "Id": "01180c414dc240d99714d11eee979638",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -488.79833005601284,
+        "Y": 2355.6684521838069
+      },
+      {
+        "Name": "Boolean",
+        "ShowGeometry": false,
+        "Id": "9ab69c7ee60a46d58bbddec53179ff51",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": true,
+        "X": -944.42446069065625,
+        "Y": 2349.869574157548
+      },
+      {
+        "Name": "Watch",
+        "ShowGeometry": true,
+        "Id": "9a25d2536a614fd6a983cedfcc0f0eb8",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": 243.10966734440041,
+        "Y": 213.19800378907661
+      },
+      {
+        "Name": "Code Block",
+        "ShowGeometry": true,
+        "Id": "ddfcda0546d44d3a9ed02ee96646fbcf",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -33.556999322266222,
+        "Y": 213.02550378907662
+      },
+      {
+        "Name": "Code Block",
+        "ShowGeometry": true,
+        "Id": "dd381ec375814e93a998cb99e6d9e77f",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -287.55699932226617,
+        "Y": 246.85300378907658
+      },
+      {
+        "Name": "Geometry.Translate",
+        "ShowGeometry": true,
+        "Id": "df77cc76cc1548d6b3d44abcb807fe8c",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -324.47578866290007,
+        "Y": 811.89213212860318
+      },
+      {
+        "Name": "Code Block",
+        "ShowGeometry": true,
+        "Id": "e52caf5a17004b02a2cda2698b144ffb",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": -578.47578866290007,
+        "Y": 845.71963212860317
+      }
+    ],
+    "Annotations": [
+      {
+        "Id": "468299bbc8184a8c8bed501540449745",
+        "Title": "<Double click here to edit group title>",
+        "DescriptionText": "<Double click here to edit group description>",
+        "IsExpanded": true,
+        "WidthAdjustment": 0.0,
+        "HeightAdjustment": 0.0,
+        "Nodes": [
+          "f4961716b91e4f71864ef4203932fdb3",
+          "359d24d2ba8e41f1a6a0adc165ba579d",
+          "bfdc041de87b4e9eb3da4bb9140b9df2",
+          "8283b57045274bb480069d4efe932e1b",
+          "4a32efaf962f44cda6281a34e5cb08d4"
+        ],
+        "HasNestedGroups": false,
+        "Left": -1147.5006867972834,
+        "Top": 1625.28663426982,
+        "Width": 1022.6666666666667,
+        "Height": 409.0,
+        "FontSize": 36.0,
+        "InitialTop": 1698.6199676031533,
+        "InitialHeight": 145.0,
+        "TextblockHeight": 63.333333333333336,
+        "Background": "#FFC1D676"
+      },
+      {
+        "Id": "f058f98494c34f2784b0a2365283c182",
+        "Title": "<Double click here to edit group title>",
+        "DescriptionText": "<Double click here to edit group description>",
+        "IsExpanded": true,
+        "WidthAdjustment": 0.0,
+        "HeightAdjustment": 0.0,
+        "Nodes": [
+          "c310f4c538e54b61a9a1f8b804f14155",
+          "ca14f8ac7c22446ca64629e8ba2a42ab",
+          "428a6edaf7684da6baff078a04c38b91",
+          "61fb4c60d05c43df8315a28a753b8da5",
+          "ca0efc073ecb499fbb18f3c3f9a67312"
+        ],
+        "HasNestedGroups": false,
+        "Left": -1263.5569993222662,
+        "Top": -74.64116287759019,
+        "Width": 488.66666666666663,
+        "Height": 738.16083333333324,
+        "FontSize": 36.0,
+        "InitialTop": 42.025503789076481,
+        "InitialHeight": 579.07998949050966,
+        "TextblockHeight": 106.66666666666667,
+        "Background": "#FFC1D676"
+      },
+      {
+        "Id": "6d1740e172724d9eaebae58bbcbf98b7",
+        "Title": "<Double click here to edit group title>",
+        "DescriptionText": "<Double click here to edit group description>",
+        "IsExpanded": true,
+        "WidthAdjustment": 0.0,
+        "HeightAdjustment": 0.0,
+        "Nodes": [
+          "9a25d2536a614fd6a983cedfcc0f0eb8",
+          "ddfcda0546d44d3a9ed02ee96646fbcf",
+          "dd381ec375814e93a998cb99e6d9e77f"
+        ],
+        "HasNestedGroups": false,
+        "Left": -297.55699932226617,
+        "Top": 139.69217045574328,
+        "Width": 827.99999999999989,
+        "Height": 371.83916666666664,
+        "FontSize": 36.0,
+        "InitialTop": 213.02550378907662,
+        "InitialHeight": 357.57428512277068,
+        "TextblockHeight": 63.333333333333336,
+        "Background": "#FFC1D676"
+      },
+      {
+        "Id": "542da61f9caa487cbff96265eaaa319f",
+        "Title": "<Double click here to edit group title>",
+        "DescriptionText": "<Double click here to edit group description>",
+        "IsExpanded": true,
+        "WidthAdjustment": 0.0,
+        "HeightAdjustment": 0.0,
+        "Nodes": [
+          "c58a3139f0bb4b45b81e453a0752344a",
+          "01180c414dc240d99714d11eee979638",
+          "9ab69c7ee60a46d58bbddec53179ff51"
+        ],
+        "HasNestedGroups": false,
+        "Left": -954.42446069065625,
+        "Top": 2276.5362408242145,
+        "Width": 918.95946396797672,
+        "Height": 376.13221135959247,
+        "FontSize": 36.0,
+        "InitialTop": 2349.869574157548,
+        "InitialHeight": 332.798878026259,
+        "TextblockHeight": 63.333333333333336,
+        "Background": "#FFC1D676"
+      },
+      {
+        "Id": "07eecbaedbf146eebc36a8ece1464166",
+        "Title": "<Double click here to edit group title>",
+        "DescriptionText": "<Double click here to edit group description>",
+        "IsExpanded": true,
+        "WidthAdjustment": 0.0,
+        "HeightAdjustment": 0.0,
+        "Nodes": [
+          "df77cc76cc1548d6b3d44abcb807fe8c",
+          "e52caf5a17004b02a2cda2698b144ffb"
+        ],
+        "HasNestedGroups": false,
+        "Left": -588.47578866290007,
+        "Top": 695.22546546193655,
+        "Width": 532.66666666666674,
+        "Height": 358.99999999999989,
+        "FontSize": 36.0,
+        "InitialTop": 811.89213212860318,
+        "InitialHeight": 320.96518982634109,
+        "TextblockHeight": 106.66666666666667,
+        "Background": "#FFC1D676"
+      }
+    ],
+    "X": 1365.8850336836413,
+    "Y": 329.07893435172355,
+    "Zoom": 0.84330139397070225
+  }
+}
