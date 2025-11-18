@@ -188,7 +188,7 @@ When multiple split points exist on a single beam:
 
 ## Author
 
-Created for Revit Dynamo workflow optimization.
+Created for Revit Dynamo workflow optimization. Created by me :) I'm Zaw.
 
 ## License
 
